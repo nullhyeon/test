@@ -1,29 +1,42 @@
+# 1. 워크플로우 이름
 name: CI with Docker & Docker Compose
 
+# 2. 트리거 (언제 실행될 것인가?)
 on:
+  # main 브랜치에 코드가 직접 push될 떄 작동
   push:
     branches: [main]
+  # main 브랜치로 합쳐달라는 pull request가 생성될 때 작동
   pull_request:
     branches: [main]
 
+# 3. 작업 정의 (무엇을 할 것인가?)
 jobs:
   build-and-test:
+    # 실행 환경 (가상 머신 OS)
     runs-on: ubuntu-latest
 
+    # 실행 단계 (순차적 실행)
     steps:
+      # (1) 코드 체크아웃: CI 서버로 내 코드를 가져옴
       - name: Check out repository
         uses: actions/checkout@v3
 
+      # (2) Docker 설치: Docker 및 Docker Compose 설치
       - name: Build & start services
         run: |
           docker compose up -d --build
-          # give the app a moment to start
+          # give the app a moment to start (실무에서는 Healthcheck 기능 사용)
           sleep 10
 
+      # (3) 테스트 실행: 컨테이너 내에서 테스트 스위트 실행
+      # 내 로컬 확인이 아닌, 가상 OS 위에서 도커로 띄운 환경에서 내 코드가 완벽하게 돌아가는지 확인
       - name: Run test suite
         run: |
           docker compose exec web pytest
 
+      # (4) 정리: 도커 컴포즈로 띄운 컨테이너,네트워크,데이터베이스 데이터까지 싹 제거
       - name: Tear down
+        # 테스트 성공하든 말든 이 단계는 무조건 실행하라는 뜻
         if: always()
         run: docker compose down --volumes --remove-orphans
