@@ -68,17 +68,18 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.GCP_SSH_KEY }}
 
-      - name: Add host key
+      - name: Prepare known_hosts
         run: |
-          ssh-keyscan -H ${{ secrets.GCP_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || true
-          if [ -n "${{ secrets.GCP_HOST_KEY }}" ]; then
-            echo "${{ secrets.GCP_HOST_KEY }}" >> ~/.ssh/known_hosts
-          fi
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          ssh-keyscan -H ${{ secrets.GCP_HOST }} >> ~/.ssh/known_hosts
+          chmod 644 ~/.ssh/known_hosts
 
       - name: Test SSH
         run: |
-          ssh -i ~/.ssh/id_rsa \
-              -o IdentitiesOnly=yes \
+          ssh -o IdentitiesOnly=yes \
+              -o BatchMode=yes \
+              -o StrictHostKeyChecking=yes \
               -o ConnectTimeout=10 \
               ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "echo OK"
 
