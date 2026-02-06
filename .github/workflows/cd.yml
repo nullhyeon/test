@@ -79,13 +79,14 @@ jobs:
           ssh-keyscan -H ${{ secrets.GCP_HOST }} >> ~/.ssh/known_hosts
           chmod 644 ~/.ssh/known_hosts
 
-      - name: Test SSH
+      - name: Test SSH (verbose)
         run: |
-          ssh -o IdentitiesOnly=yes \
-              -o BatchMode=yes \
-              -o StrictHostKeyChecking=yes \
-              -o ConnectTimeout=10 \
-              ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "echo OK"
+          ssh -vvv \
+            -o IdentitiesOnly=yes \
+            -o BatchMode=yes \
+            -o StrictHostKeyChecking=yes \
+            -o ConnectTimeout=10 \
+            ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "echo OK"
 
       # ── 1. 디렉터리 & .env ──────────────────────────────────────────────
       - name: Prepare remote directory & .env
