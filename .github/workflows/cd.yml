@@ -76,7 +76,11 @@ jobs:
           fi
 
       - name: Test SSH
-        run: ssh -o ConnectTimeout=10 ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "echo OK"
+        run: |
+          ssh -i ~/.ssh/id_rsa \
+              -o IdentitiesOnly=yes \
+              -o ConnectTimeout=10 \
+              ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "echo OK"
 
       # ── 1. 디렉터리 & .env ──────────────────────────────────────────────
       - name: Prepare remote directory & .env
