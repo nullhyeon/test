@@ -116,24 +116,41 @@ jobs:
       # ── 4. HTTP 응답 대기 ───────────────────────────────────────────────
       - name: Wait for HTTP
         run: |
+          SUCCESS=false
           for i in {1..24}; do
             if curl -sSf -m 5 http://${{ env.DOMAIN }} >/dev/null 2>&1; then
-              echo "HTTP OK"; break
+              echo "HTTP OK"; SUCCESS=true; break
             fi
             echo "...waiting HTTP (${i}/24)"; sleep 5
           done
+          if [ "$SUCCESS" != "true" ]; then
+            echo "ERROR: HTTP verification failed after 2 minutes"
+            exit 1
+          fi
 
       # ── 5. 인증서 발급/갱신 ──────────────────────────────────────────────
       - name: Issue / Renew SSL
         run: |
-          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "
-            cd '${{ env.REMOTE_DIR }}' &&
-            docker compose -f docker-compose.prod.yml run --rm certbot \
+          ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} <<'EOF'
+            cd '${{ env.REMOTE_DIR }}'
+
+            if ! docker compose -f docker-compose.prod.yml run --rm certbot \
               certonly --webroot -w /var/www/certbot \
               --non-interactive --keep-until-expiring \
               --email '${{ env.LETSENCRYPT_EMAIL }}' -d '${{ env.DOMAIN }}' \
-              --agree-tos --no-eff-email --rsa-key-size 4096
-          "
+              --agree-tos --no-eff-email --rsa-key-size 4096; then
+              echo "ERROR: SSL certificate issuance/renewal failed"
+              exit 1
+            fi
+
+            # 인증서 파일이 실제로 생성되었는지 확인
+            if [ ! -f "./certbot/config/live/${{ env.DOMAIN }}/fullchain.pem" ]; then
+              echo "ERROR: Certificate files not found"
+              exit 1
+            fi
+
+            echo "✓ SSL certificate ready"
+          EOF
 
       # ── 6. SSL helper 파일 확보(+디렉터리 보장) ──────────────────────────
       - name: Provide ssl helper files for nginx
@@ -187,14 +204,27 @@ jobs:
       - name: Apply HTTPS config & reload nginx
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} <<'EOF'
-            cd '${{ env.REMOTE_DIR }}' &&
-            docker compose -f docker-compose.prod.yml exec nginx sh -c '
-              # 모든 환경변수 치환 (여기선 DOMAIN)
+            cd '${{ env.REMOTE_DIR }}'
+
+            # nginx 컨테이너가 실행 중인지 확인
+            if ! docker compose -f docker-compose.prod.yml ps nginx | grep -q "Up"; then
+              echo "ERROR: nginx container is not running"
+              exit 1
+            fi
+
+            # HTTPS 설정 적용 및 reload
+            if ! docker compose -f docker-compose.prod.yml exec nginx sh -c '
               envsubst '\''$DOMAIN'\'' \
                 < /etc/nginx/templates/default.conf.template \
                 > /etc/nginx/conf.d/default.conf \
+              && nginx -t \
               && nginx -s reload
-            '
+            '; then
+              echo "ERROR: Failed to reload nginx with HTTPS config"
+              exit 1
+            fi
+
+            echo "✓ nginx reloaded with HTTPS config"
           EOF
 
       # ── 9. 최신 이미지 pull & 전체 스택 ─────────────────────────────────
@@ -209,12 +239,17 @@ jobs:
       # ── 10. HTTPS 검증 ──────────────────────────────────────────────────
       - name: Verify HTTPS
         run: |
+          SUCCESS=false
           for i in {1..12}; do
             if curl -sSf -m 5 https://${{ env.DOMAIN }} >/dev/null 2>&1; then
-              echo "HTTPS OK"; break
+              echo "HTTPS OK"; SUCCESS=true; break
             fi
             echo "...waiting HTTPS (${i}/12)"; sleep 10
           done
+          if [ "$SUCCESS" != "true" ]; then
+            echo "ERROR: HTTPS verification failed after 2 minutes"
+            exit 1
+          fi
 
       # ── 11. 오래된 이미지 정리 ──────────────────────────────────────────
       - name: Prune images
