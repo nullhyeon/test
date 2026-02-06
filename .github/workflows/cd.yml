@@ -68,6 +68,10 @@ jobs:
         with:
           ssh-private-key: ${{ secrets.GCP_SSH_KEY }}
 
+      - name: Debug ssh-agent
+        run: |
+          ssh-add -l
+
       - name: Prepare known_hosts
         run: |
           mkdir -p ~/.ssh
