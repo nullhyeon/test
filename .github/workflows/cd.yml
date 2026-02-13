@@ -187,6 +187,7 @@ jobs:
             LETSENCRYPT_EMAIL=${{ env.LETSENCRYPT_EMAIL }}
             IMAGE_TAG=${{ env.IMAGE_TAG }}
             DOCKERHUB_USERNAME=${{ secrets.DOCKERHUB_USERNAME }}
+            IMAGE_REF=${{ env.IMG }}
             EOT
           EOF
 
