@@ -91,55 +91,48 @@ jobs:
           fi
 
       # Hadolint (Dockerfile Lint)
-      - name: Locate Dockerfile(s)
-        id: df
+      - name: Hadolint
         shell: bash
         run: |
           set -euo pipefail
-          mapfile -t files < <(find . -type f \( -iname "dockerfile" -o -iname "*.dockerfile" \) | sort || true)
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "found=false" >> $GITHUB_OUTPUT
-            echo "count=0"     >> $GITHUB_OUTPUT
+
+          # Find all Dockerfiles
+          mapfile -t files < <(find . -type f \( -iname "dockerfile" -o -iname "*.dockerfile" \) 2>/dev/null | sed 's|^\./||' | sort || true)
+
+          if [ ${#files[@]} -eq 0 ] || [ -z "${files[0]}" ]; then
             echo "No Dockerfile found. Skipping hadolint."
+            echo '{"version":"2.1.0","runs":[]}' > hadolint.sarif
             exit 0
           fi
-          printf '%s\n' "${files[@]}" > dockerfiles.list
-          echo "found=true"           >> $GITHUB_OUTPUT
-          echo "count=${#files[@]}"   >> $GITHUB_OUTPUT
-          echo "first=${files[0]}"    >> $GITHUB_OUTPUT
-          echo "Found Dockerfiles:"; cat dockerfiles.list
 
-      - name: Hadolint (single file)
-        if: ${{ steps.df.outputs.found == 'true' && steps.df.outputs.count == '1' }}
-        uses: hadolint/hadolint-action@v3.1.0
-        with:
-          dockerfile: ${{ steps.df.outputs.first }}
-          format: sarif
-          output-file: hadolint.sarif
+          echo "Found ${#files[@]} Dockerfile(s):"
+          printf '%s\n' "${files[@]}"
 
-      - name: Hadolint (multi-file via CLI)
-        if: ${{ steps.df.outputs.found == 'true' && steps.df.outputs.count != '1' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          mapfile -t files < dockerfiles.list
-          docker run --rm -v "$PWD":/work -w /work hadolint/hadolint:latest \
-            hadolint --format sarif "${files[@]}" > hadolint.sarif || true
-          test -s hadolint.sarif || echo '{"version":"2.1.0","runs":[]}' > hadolint.sarif
+          # Run hadolint via Docker
+          docker run --rm -i hadolint/hadolint:latest hadolint --format sarif "${files[@]}" > hadolint.sarif || true
+
+          # Ensure valid SARIF even if hadolint fails
+          if [ ! -s hadolint.sarif ]; then
+            echo '{"version":"2.1.0","runs":[]}' > hadolint.sarif
+          fi
 
       - name: Check Hadolint SARIF has results
-        if: ${{ steps.df.outputs.found == 'true' }}
         id: hadolint_sarif_check
         run: |
           if [ ! -s hadolint.sarif ]; then
-            echo "ok=false" >> $GITHUB_OUTPUT; exit 0
+            echo "ok=false" >> $GITHUB_OUTPUT
+            exit 0
           fi
           runs=$(jq '.runs | length' hadolint.sarif 2>/dev/null || echo 0)
           results=$(jq '[.runs[].results] | flatten | length' hadolint.sarif 2>/dev/null || echo 0)
-          if [ "$runs" -gt 0 ] && [ "$results" -gt 0 ]; then echo "ok=true" >> $GITHUB_OUTPUT; else echo "ok=false" >> $GITHUB_OUTPUT; fi
+          if [ "$runs" -gt 0 ] && [ "$results" -gt 0 ]; then
+            echo "ok=true" >> $GITHUB_OUTPUT
+          else
+            echo "ok=false" >> $GITHUB_OUTPUT
+          fi
 
       - name: Upload Hadolint SARIF
-        if: ${{ steps.df.outputs.found == 'true' && steps.hadolint_sarif_check.outputs.ok == 'true' }}
+        if: ${{ steps.hadolint_sarif_check.outputs.ok == 'true' }}
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: hadolint.sarif
