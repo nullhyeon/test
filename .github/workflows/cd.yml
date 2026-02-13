@@ -1,5 +1,5 @@
 # .github/workflows/cd.yml
-name: CD – Build, Push & Deploy to GCE
+name: CD - Build, Push & Deploy to GCE
 
 on:
   push:
@@ -47,22 +47,115 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  security-gate:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      security-events: write
+    env:
+      IMG: ${{ secrets.DOCKERHUB_USERNAME }}/myflask@${{ needs.build-and-push.outputs.image-digest }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trivy image scan (HIGH/CRIT fail)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.IMG }}
+          pkg-types: "os,library"
+          severity: "HIGH,CRITICAL"
+          ignore-unfixed: true
+          format: sarif
+          output: trivy-image.sarif
+          exit-code: "1"
+          scanners: "vuln"
+
+      - name: Upload Trivy SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-image.sarif
+
+      - name: Trivy JSON (for SeveritySource)
+        if: always()
+        run: |
+          trivy image --scanners vuln \
+            --pkg-types os,library \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --detection-priority precise \
+            -f json -o trivy-image.json "${IMG}" || true
+
+      - name: Upload Trivy JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-image-json
+          path: trivy-image.json
+          retention-days: 7
+
+      - name: Login to Docker Hub (for cosign push)
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: SBOM (SPDX)
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.IMG }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3.9.2
+
+      - name: Cosign sign & attest (keyless)
+        env: { COSIGN_EXPERIMENTAL: "1" }
+        run: |
+          set -euo pipefail
+          cosign sign --yes "$IMG"
+          cosign attest --yes --predicate sbom.spdx.json --type spdx "$IMG"
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-spdx
+          path: sbom.spdx.json
+          retention-days: 30
+
   ###############################################################################
   # 2) Deploy to GCE VM
   ###############################################################################
   deploy:
-    needs: build-and-push
+    needs: [build-and-push, security-gate]
     runs-on: ubuntu-latest
     env:
       REMOTE_DIR: ${{ secrets.REMOTE_APP_DIR }}
       DOMAIN: ${{ secrets.DOMAIN }}
       LETSENCRYPT_EMAIL: ${{ secrets.LETSENCRYPT_EMAIL }}
       IMAGE_TAG: ${{ github.sha }}
+      IMAGE_DIGEST: ${{ needs.build-and-push.outputs.image-digest }}
+      IMG: ${{ secrets.DOCKERHUB_USERNAME }}/myflask@${{ needs.build-and-push.outputs.image-digest }}
 
     steps:
       - uses: actions/checkout@v4
 
-      # ── 0. SSH 준비 ──────────────────────────────────────────────────────
+      - name: Install cosgn
+        uses: sigstore/cosign-installer@v3.9.2
+
+      - name: Verify image sigature (keyless)
+        env: { COSIGN_EXPERIMENTAL: "1" }
+        run: |
+          set -euo pipefail
+          cosign verify \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --certificate-identity-regexp "https://github.com/${{ github.repository }}(/|@).*" \
+            "${IMG}" >/dev/null
+            echo "Cosign verify OK for ${IMG}"
+
+      # SSH Setup
       - name: Set up SSH agent
         uses: webfactory/ssh-agent@v0.9.0
         with:
@@ -83,10 +176,11 @@ jobs:
             -o ConnectTimeout=10 \
             ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "echo OK"
 
-      # ── 1. 디렉터리 & .env ──────────────────────────────────────────────
+      # Prepare remote directory and .env
       - name: Prepare remote directory & .env
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} <<'EOF'
+            set -euo pipefail
             mkdir -p "${{ env.REMOTE_DIR }}"/{nginx,certbot/{config,www,logs}}
             cat > "${{ env.REMOTE_DIR }}/.env" <<EOT
             DOMAIN=${{ env.DOMAIN }}
@@ -96,7 +190,7 @@ jobs:
             EOT
           EOF
 
-      # ── 2. HTTP-only 템플릿 & Compose 업로드 ─────────────────────────────
+      # Upload HTTP-only template and compose
       - name: Upload HTTP-only Nginx template and compose
         run: |
           scp -o StrictHostKeyChecking=no nginx/default.http.conf.template \
@@ -104,7 +198,7 @@ jobs:
           scp -o StrictHostKeyChecking=no docker-compose.prod.yml \
             ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }}:"${{ env.REMOTE_DIR }}/"
 
-      # ── 3. 스택 기동 (80) ───────────────────────────────────────────────
+      # Start HTTP-only stack
       - name: Start HTTP-only stack
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "
@@ -113,7 +207,7 @@ jobs:
             docker compose -f docker-compose.prod.yml up -d nginx web
           "
 
-      # ── 4. HTTP 응답 대기 ───────────────────────────────────────────────
+      # Wait for HTTP
       - name: Wait for HTTP
         run: |
           SUCCESS=false
@@ -128,7 +222,7 @@ jobs:
             exit 1
           fi
 
-      # ── 5. 인증서 발급/갱신 ──────────────────────────────────────────────
+      # Issue or renew SSL certificate
       - name: Issue / Renew SSL
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} <<'EOF'
@@ -143,16 +237,15 @@ jobs:
               exit 1
             fi
 
-            # 인증서 파일이 실제로 생성되었는지 확인
             if [ ! -f "./certbot/config/live/${{ env.DOMAIN }}/fullchain.pem" ]; then
               echo "ERROR: Certificate files not found"
               exit 1
             fi
 
-            echo "✓ SSL certificate ready"
+            echo "SSL certificate ready"
           EOF
 
-      # ── 6. SSL helper 파일 확보(+디렉터리 보장) ──────────────────────────
+      # Provide SSL helper files for nginx
       - name: Provide ssl helper files for nginx
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} <<'EOF'
@@ -161,10 +254,8 @@ jobs:
               OPTIONS=/etc/letsencrypt/options-ssl-nginx.conf
               DHPARAM=/etc/letsencrypt/ssl-dhparams.pem
 
-              # 0) 반드시 디렉터리 확보
               mkdir -p /etc/letsencrypt
 
-              # 1) options-ssl-nginx.conf 확보
               if [ ! -f "$OPTIONS" ]; then
                 SRC=$(find /usr /opt -maxdepth 7 -type f -name options-ssl-nginx.conf 2>/dev/null | head -n1 || true)
                 if [ -n "$SRC" ]; then
@@ -176,7 +267,6 @@ jobs:
                 fi
               fi
 
-              # 1-b) 최소 TLS 설정 (fallback)
               if [ ! -s "$OPTIONS" ]; then
                 printf "%s\n" \
                   "ssl_session_cache   shared:SSL:10m;" \
@@ -187,32 +277,29 @@ jobs:
                   > "$OPTIONS"
               fi
 
-              # 2) ssl-dhparams.pem (없으면 2048bit 생성)
               if [ ! -f "$DHPARAM" ]; then
                 openssl dhparam -out "$DHPARAM" 2048
               fi
             '
           EOF
 
-      # ── 7. HTTPS 템플릿 업로드 ───────────────────────────────────────────
+      # Upload HTTPS template
       - name: Upload HTTPS Nginx template
         run: |
           scp -o StrictHostKeyChecking=no nginx/default.https.conf.template \
             ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }}:"${{ env.REMOTE_DIR }}/nginx/default.conf.template"
 
-      # ── 8. conf 재생성 & nginx reload ───────────────────────────────────
+      # Apply HTTPS config and reload nginx
       - name: Apply HTTPS config & reload nginx
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} <<'EOF'
             cd '${{ env.REMOTE_DIR }}'
 
-            # nginx 컨테이너가 실행 중인지 확인
             if ! docker compose -f docker-compose.prod.yml ps nginx | grep -q "Up"; then
               echo "ERROR: nginx container is not running"
               exit 1
             fi
 
-            # HTTPS 설정 적용 및 reload
             if ! docker compose -f docker-compose.prod.yml exec nginx sh -c '
               envsubst '\''$DOMAIN'\'' \
                 < /etc/nginx/templates/default.conf.template \
@@ -224,10 +311,10 @@ jobs:
               exit 1
             fi
 
-            echo "✓ nginx reloaded with HTTPS config"
+            echo "nginx reloaded with HTTPS config"
           EOF
 
-      # ── 9. 최신 이미지 pull & 전체 스택 ─────────────────────────────────
+      # Deploy latest stack
       - name: Deploy latest stack
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "
@@ -236,7 +323,7 @@ jobs:
             docker compose -f docker-compose.prod.yml up -d --remove-orphans
           "
 
-      # ── 10. HTTPS 검증 ──────────────────────────────────────────────────
+      # Verify HTTPS
       - name: Verify HTTPS
         run: |
           SUCCESS=false
@@ -251,13 +338,13 @@ jobs:
             exit 1
           fi
 
-      # ── 11. 오래된 이미지 정리 ──────────────────────────────────────────
+      # Prune old images
       - name: Prune images
         run: |
           ssh ${{ secrets.GCP_USER }}@${{ secrets.GCP_HOST }} "docker image prune -f --filter 'until=24h' || true"
 
   ###############################################################################
-  # 3) 통합 알림 (콘솔)
+  # 3) Notification
   ###############################################################################
   notify:
     needs: [build-and-push, deploy]
