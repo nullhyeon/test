@@ -7,4 +7,6 @@ def client():
 
 def test_hello(client):
     response = client.get('/')
-    assert response.data == b'Hello, Flask!'
+    assert response.status_code == 200
+    assert b'<!doctype html>' in response.data
+    assert b'<canvas id="scene"></canvas>' in response.data
