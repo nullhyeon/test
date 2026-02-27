@@ -1,19 +1,24 @@
-FROM python:3.10-slim
+FROM python:3.12-slim-bookworm
 
-# 작업 디렉터리
+ARG INSTALL_DEV=false
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
 WORKDIR /app
 
-RUN python -m pip install --upgrade pip setuptools wheel
-# 의존성 설치
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN apt-get update \
+    && apt-get upgrade -y \
+    && rm -rf /var/lib/apt/lists/*
 
+COPY requirements.txt requirements-dev.txt ./
+RUN python -m pip install --upgrade pip setuptools wheel \
+    && pip install -r requirements.txt \
+    && if [ "$INSTALL_DEV" = "true" ]; then pip install -r requirements-dev.txt; fi
 
-# 앱 소스 복사
 COPY . .
 
-# Flask가 바인딩할 포트
 EXPOSE 5000
 
-# 컨테이너 시작 시 실행 명령
 CMD ["python", "app.py"]
