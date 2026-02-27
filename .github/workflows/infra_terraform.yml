@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: "Terraform action"
+        description: "Terraform Action"
         required: true
         default: plan
         type: choice
