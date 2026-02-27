@@ -6,7 +6,7 @@
 
   vars:
     app_name: "{{ lookup('env', 'APP_NAME') | default('flask-app', true) }}"
-    namespace: "{{ lookup('env', 'K8S_NAMESPACE') | default('flask-app', true) }}"
+    k8s_namespace: "{{ lookup('env', 'K8S_NAMESPACE') | default('flask-app', true) }}"
     image_ref_env: "{{ lookup('env', 'IMAGE_REF') | default('', true) | trim }}"
     dockerhub_username: "{{ lookup('env', 'DOCKERHUB_USERNAME') | default('', true) | trim }}"
     image_ref_fallback: "{{ (dockerhub_username ~ '/' ~ app_name ~ ':latest') if (dockerhub_username | length > 0) else (app_name ~ ':latest') }}"
@@ -179,14 +179,14 @@
     - name: Ensure target namespace exists before TLS secret apply
       ansible.builtin.shell: |
         set -euo pipefail
-        kubectl create namespace {{ namespace }} --dry-run=client -o yaml | kubectl apply -f -
+        kubectl create namespace {{ k8s_namespace }} --dry-run=client -o yaml | kubectl apply -f -
       args:
         executable: /bin/bash
 
     - name: Upsert Kubernetes TLS secret from certbot output
       ansible.builtin.shell: |
         set -euo pipefail
-        kubectl -n {{ namespace }} create secret tls {{ tls_secret_name }} \
+        kubectl -n {{ k8s_namespace }} create secret tls {{ tls_secret_name }} \
           --cert={{ cert_fullchain_path }} \
           --key={{ cert_privkey_path }} \
           --dry-run=client -o yaml | kubectl apply -f -
@@ -204,10 +204,10 @@
       ansible.builtin.command: kubectl apply -f /tmp/{{ app_name }}.yaml
 
     - name: Wait for deployment rollout
-      ansible.builtin.command: kubectl -n {{ namespace }} rollout status deployment/{{ app_name }} --timeout=240s
+      ansible.builtin.command: kubectl -n {{ k8s_namespace }} rollout status deployment/{{ app_name }} --timeout=240s
 
     - name: Show deployment and service status
-      ansible.builtin.command: kubectl -n {{ namespace }} get deployment,service -o wide
+      ansible.builtin.command: kubectl -n {{ k8s_namespace }} get deployment,service -o wide
       register: workload_status
       changed_when: false
 

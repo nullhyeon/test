@@ -226,6 +226,21 @@ jobs:
       - name: Test SSH
         run: ssh -o ConnectTimeout=10 "$GCP_USER@$GCP_HOST" "echo OK"
 
+      - name: Validate sudo access
+        env:
+          GCP_SUDO_PASSWORD: ${{ secrets.GCP_SUDO_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -n "${GCP_SUDO_PASSWORD:-}" ]; then
+            echo "Using GCP_SUDO_PASSWORD for Ansible become."
+          else
+            ssh -o BatchMode=yes -o ConnectTimeout=10 "$GCP_USER@$GCP_HOST" "sudo -n true" || {
+              echo "ERROR: Passwordless sudo is required when GCP_SUDO_PASSWORD is not set." >&2
+              echo "Set secret GCP_SUDO_PASSWORD or configure NOPASSWD sudo for ${GCP_USER}." >&2
+              exit 1
+            }
+          fi
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -256,9 +271,15 @@ jobs:
           REPLICAS: ${{ vars.REPLICAS }}
           SERVICE_TYPE: ${{ vars.SERVICE_TYPE }}
           K3S_NODE_PORT: ${{ vars.K3S_NODE_PORT }}
+          GCP_SUDO_PASSWORD: ${{ secrets.GCP_SUDO_PASSWORD }}
         run: |
+          set -euo pipefail
+          ANSIBLE_ARGS=()
+          if [ -n "${GCP_SUDO_PASSWORD:-}" ]; then
+            ANSIBLE_ARGS+=("-e" "ansible_become_password=${GCP_SUDO_PASSWORD}")
+          fi
           ANSIBLE_CONFIG=ansible/ansible.cfg \
-          ansible-playbook -i ansible/inventory/gce_k3s.ini ansible/playbooks/deploy-gce-k3s.yml
+          ansible-playbook -i ansible/inventory/gce_k3s.ini ansible/playbooks/deploy-gce-k3s.yml "${ANSIBLE_ARGS[@]}"
 
       - name: Verify app endpoint (80/443 via ingress)
         run: |
